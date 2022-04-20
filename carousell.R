@@ -1,0 +1,363 @@
+#declare filepath
+filePath = 'C:/Users/llili/Downloads/Telegram Desktop/loans2.csv'
+
+#import library
+library(tidyverse)
+library(GGally)
+library(rpart)
+library(rpart.plot)
+library(vip)
+library(pdp)
+library(caret)
+library(ggplot2)
+
+
+#read csv into dataframe
+df <- read.csv(file = filePath)
+#qn 1
+head(df)
+
+#qn 2
+mutate(df, Approval = if_else(Approval == "Yes", 1L, 0L)) %>%
+  pivot_longer(cols = all_of(names(df)), names_to = "variable")%>% 
+  ggplot( aes(x = variable, y = value) ) +
+  geom_point() +
+  facet_wrap(~ variable, scales = "free", ncol = 1) +
+  theme_bw() +
+  theme(strip.text.x = element_blank()) +
+  coord_flip()
+
+#qn 3
+loans.gathered <- df %>%
+  as_data_frame() %>%
+  gather(key = "variable", value = "value", -Approval)
+
+head(loans.gathered)
+ggplot(loans.gathered, aes(value, fill=Approval)) + facet_wrap(~variable, scales = "free") + geom_density(alpha = 0.4)
+
+
+#qn4
+ggpairs(df)
+
+#qn 5 
+set.seed(12345)
+train_idx = createDataPartition(df$FICO.Score, p = .8, list = F)
+
+Train <- df[ train_idx,]
+Test  <- df[-train_idx,]
+
+head(Train)
+head(Test)
+
+#convert Approval from "Yes" and "No" to 1's and 0's for later use
+df$Approval<-ifelse(df$Approval=="Yes",1,0)
+newTrain <- df[ train_idx,]
+newTest  <- df[-train_idx,]
+
+
+#qn 6
+tr.ctrl <- trainControl(method = "repeatedcv",
+                        number = 10,
+                        repeats = 5,
+                        summaryFunction = twoClassSummary,
+                        classProbs = TRUE
+)
+
+set.seed(230322)
+glm.fit <- train(Approval ~ ., data = Train,
+                 trControl = tr.ctrl,
+                 method = "glm", family = "binomial",
+                 metric = "Accuracy",
+                 preProcess = c("center", "scale"))
+
+
+#qn 7
+
+set.seed(230322)
+ridge.fit <- train(Approval ~ ., data = Train, 
+                   trControl = tr.ctrl,
+                   method = "glmnet", family = "binomial", 
+                   # metric = "ROC",
+                   preProcess = c("center", "scale"),
+                   tuneGrid = 
+                     expand.grid(alpha = 0, 
+                                 lambda = seq(10^-6, 0.2, length.out = 100))
+)
+
+
+#qn 8
+set.seed(230322)
+tree.fit <- train(Approval ~ ., data = Train
+                  , trControl = tr.ctrl
+                  , method = "rpart"
+                  # , metric = "ROC"
+                  , preProcess = c("center", "scale")
+                  , tuneGrid = expand.grid(cp = seq(.00001, 1, length.out = 100 ) )
+                  , control = rpart.control(minsplit = 10)
+)
+
+
+
+#qn 9
+model.resamples <- resamples(list(logistic = glm.fit, ridge = ridge.fit, tree = tree.fit))
+summary(model.resamples)
+
+model.list <- list(logistic = glm.fit, ridge = ridge.fit, tree = tree.fit)
+models.preds <- lapply(model.list, predict, newdata = Test, type = "raw")
+
+confusion.list <- lapply( models.preds, confusionMatrix, 
+                          reference = as.factor(Test$Approval),
+                          positive = "Yes")
+
+confusion.list
+#based on the accuracy metric, the tree would be the best model as it has scored the highest.
+#
+
+logistic.pred <- predict(glm.fit, newdata = Test)
+ridge.pred <- predict(ridge.fit, newdata = Test)
+Tree.pred <- predict(tree.fit, newdata = Test)
+
+#get test error:-------------
+get_error.fn <- function(Y.pred, Y.raw){
+  SS.total <- sum( (Y.raw - mean(Y.raw) ) ^2  ) 
+  SS.err <- sum((Y.raw - Y.pred)^2)
+  R2 = 1 - (SS.err/SS.total)
+  RMSE = sqrt( mean((Y.raw - Y.pred)^2) )
+  return(data.frame(R2, RMSE ))
+}
+dv = "Approval"
+
+
+logistic.pred<-ifelse(logistic.pred=="Yes",1,0)
+result1<-get_error.fn(logistic.pred, newTest[, dv])
+
+result1
+
+ridge.pred<-ifelse(ridge.pred=="Yes",1,0)
+result2<-get_error.fn(ridge.pred, newTest[, dv])
+
+result2
+
+Tree.pred<-ifelse(Tree.pred=="Yes",1,0)
+result3<-get_error.fn(Tree.pred, newTest[, dv])
+
+result3
+
+# using the RMSE metric, it is also suitable to choose tree model as it has scored the lowest, which
+# shows that the tree model is able to fit the testing data.
+
+#Using the R2 metric, the tree model has also scored the highest makes it 
+# suitable as higher R-squared values represent smaller differences between the observed data and the fitted values.
+
+#choose tree model as best model based on accuracy, r2 and RMSE metric.
+#overall would improve all models by increasing the amount of data used to both training and testing
+#and trained using cross validation
+
+#qn 10
+library(ROCR)
+
+model.list <- list(logistic = glm.fit, ridge = ridge.fit, tree = tree.fit)
+
+#get probability predictions into a list:
+prob.preds <- lapply(model.list, predict, newdata = Test, type = "prob")
+
+#get the YES prob (the 2nd column of predictions by looping through prob list:
+prob.preds <- sapply(prob.preds, function(x) x[, 2])
+
+#get ROCR prediction for each method:
+prediction.list <- apply(prob.preds, 2, prediction,labels = Test$Approval )
+
+#get performance of each method from prediction object:
+perf.list <- lapply(prediction.list, performance, measure = "tpr", x.measure = "fpr")
+
+#plot ROC
+plot(perf.list[[1]], col = "black")
+abline(c(0, 1), lty = 2)
+for(i in 2: length(perf.list)){
+  plot(perf.list[[i]], col = i , lty = i, add = TRUE)
+}
+
+#add legend:
+legend(x=0.7, y=0.4, 
+       legend=c("Logistic", "Ridge", 
+                "LASSO", "TREE"), 
+       lty=c(1, 2, 3, 4), lwd=c(2, 2, 2, 2), 
+       col=c("black", 2, 3, 4))
+
+#AUC
+values<-lapply(prediction.list, function(x){
+  as.numeric(performance(x, "auc")@y.values)
+})
+
+values
+
+logistic<-c(0.8606419,"logistic")
+ridge<-c(0.8606114, "ridge")
+tree<-c(0.8637657, "tree")
+
+df <- as.data.frame(rbind(logistic, ridge, tree), stringsAsFactors = FALSE)
+names(df) <- c('yes',"method")
+
+df
+
+boot.test.fn <- function(sample.dat, model, boot.iters){
+  boot.err.dat <- data.frame(NUC = NULL)
+  
+  for(i in 1:boot.iters){
+    boot.index <- sample(1:nrow(sample.dat), replace = TRUE)
+    boot.test <- sample.dat[ boot.index, ]
+
+    #get probability predictions into a list:
+    prob.preds <- predict(model, newdata = boot.test, type = "prob")
+    
+    #get the YES prob (the 2nd column of predictions by looping through prob list:
+    # prob.preds <- sapply(prob.preds, function(x) x)
+    
+    #get ROCR prediction for each method:
+    prediction.list <- apply(prob.preds, 2, prediction,labels = boot.test$Approval )
+    
+    values<-(lapply(prediction.list, function(x){
+      as.numeric(performance(x, "auc")@y.values)
+    }))
+    
+    boot.err.dat<- rbind(boot.err.dat, values)
+    
+    
+  } # end of boot.iters
+  
+  return(boot.err.dat)
+  
+} # end of boot.function
+
+boot.iterations = 1000
+model.list <- list(logistic = glm.fit, ridge = ridge.fit, tree = tree.fit)
+
+logisticTest<-boot.test.fn(Test, glm.fit, boot.iterations)
+ridgeTest<-boot.test.fn(Test, ridge.fit, boot.iterations)
+treeTest<-boot.test.fn(Test, tree.fit, boot.iterations)
+
+logisticTest$method = "logistic"
+ridgeTest$method = "ridge"
+treeTest$method = "tree"
+
+boot.results.dat <- rbind(logisticTest, ridgeTest, treeTest)
+
+boot.results.dat
+
+# good until here
+boot.long <- reshape2::melt(boot.results.dat, 
+                            id.vars = "method",
+                            variable.name = "type",
+                            value.name = "auc")
+
+boot.long<-boot.long[!boot.long$type == "No", ]
+
+boot.long
+
+boot.SE.dat <- boot.long %>% 
+  group_by(method) %>% 
+  dplyr::summarize(SE = sd(auc, na.rm = TRUE) )
+
+boot.SE.dat
+
+
+
+est.long <-  reshape2::melt(df, 
+                            id.vars = "method",
+                            variable.name = "type",
+                            value.name = "auc")
+
+est.long
+
+library(Hmisc)
+plot.dat <- merge(est.long, boot.SE.dat)
+
+ggplot(boot.long, aes(x = method, y = auc)) +
+  stat_summary(fun.data = mean_sdl, #the package Hmisc is required for this argument to work properly
+               fun.args = list(mult = 1), # the default gives the 95%CIs, but this argument specifies 1 SD.
+               geom = "pointrange"
+  )
+plot.dat
+ggplot(plot.dat, aes(x = method, y = as.numeric(auc), color = method)) +
+  geom_pointrange(aes(ymin = as.numeric(auc) - as.numeric(SE), ymax = as.numeric(auc) + as.numeric(SE))) +
+  theme_bw() +
+  labs(caption = "The points depict the original test estimates.\n
+                  The Error-bars depict the bootstrap SEs")
+
+#qn 12
+#model.list <- list(logistic = glm.fit, ridge = ridge.fit, tree = tree.fit)
+#lapply(model.list, vip)
+
+vip(glm.fit)
+vip(ridge.fit)
+vip(tree.fit)
+
+
+#qn 13
+
+#logistic
+glm.partial <- partial(glm.fit, pred.var = c("FICO.Score", "Debt.to.Income.Ratio"),
+                       plot.engine = "ggplot",
+                       train = Train,
+                       chull = FALSE)
+
+plotPartial(glm.partial, levelplot = FALSE, zlab = "Approval", drape = TRUE,
+            colorkey = TRUE, 
+            screen = list(z = 80, x = -80),
+            main = "glm"
+)
+
+ggplot2::autoplot(glm.partial, contour = TRUE, legend.title = "", main = "glm") + 
+  theme(legend.position = "right")
+
+#How Fico score affects
+partial(glm.fit, pred.var = "FICO.Score", plot = TRUE, rug = TRUE, 
+        plot.engine = "ggplot2", main = "glm")
+
+
+#How Debt.to.Income.Ratio affects
+partial(glm.fit, pred.var = "Debt.to.Income.Ratio", plot = TRUE, rug = TRUE, 
+        plot.engine = "ggplot2", main = "glm")
+
+
+#ridge
+ridge.partial <- partial(ridge.fit, pred.var = c("FICO.Score", "Debt.to.Income.Ratio"),
+                         plot.engine = "ggplot",
+                         train = Train,
+                         chull = FALSE)
+
+plotPartial(ridge.partial, levelplot = FALSE, zlab = "Approval", drape = TRUE,
+            colorkey = TRUE, 
+            screen = list(z = 80, x = -80),
+            main = "ridge"
+)
+
+#How Fico score affects
+partial(ridge.fit, pred.var = "FICO.Score", plot = TRUE, rug = TRUE, 
+        plot.engine = "ggplot2", main = "glm")
+
+
+#How Debt.to.Income.Ratio affects
+partial(ridge.fit, pred.var = "Debt.to.Income.Ratio", plot = TRUE, rug = TRUE, 
+        plot.engine = "ggplot2", main = "glm")
+
+#tree
+tree.partial <- partial(tree.fit, pred.var = c("FICO.Score", "Debt.to.Income.Ratio"),
+                        plot.engine = "ggplot",
+                        train = Train,
+                        chull = FALSE)
+
+plotPartial(tree.partial, levelplot = FALSE, zlab = "Outcome", drape = TRUE,
+            colorkey = TRUE, rug = TRUE,
+            screen = list(z = -70, x = -60),
+            # screen = list(z = 50, x = -80),
+            main = "tree"
+)
+#How Fico score affects
+partial(tree.fit, pred.var = "FICO.Score", plot = TRUE, rug = TRUE, 
+        plot.engine = "ggplot2", main = "glm")
+
+
+#How Debt.to.Income.Ratio affects
+partial(tree.fit, pred.var = "Debt.to.Income.Ratio", plot = TRUE, rug = TRUE, 
+        plot.engine = "ggplot2", main = "glm")
